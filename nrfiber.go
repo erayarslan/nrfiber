@@ -1,6 +1,7 @@
 package nrfiber
 
 import (
+	"github.com/newrelic/go-agent/v3/newrelic"
 	"net/http"
 	"net/url"
 
@@ -49,6 +50,31 @@ func toHTTPRequest(ctx *fasthttp.RequestCtx) *http.Request {
 	}
 }
 
+func Wrapper(handler fiber.Handler) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		app := c.Locals("newrelic_app")
+
+		if app == nil {
+			return handler(c)
+		}
+
+		txn := app.(*newrelic.Application).StartTransaction(c.Route().Path)
+		txn.SetWebRequestHTTP(toHTTPRequest(c.Context()))
+
+		result := handler(c)
+
+		rw := txn.SetWebResponse(&ResponseWriter{
+			header: transformResponseHeaders(&c.Context().Response),
+		})
+
+		rw.WriteHeader(c.Context().Response.StatusCode())
+
+		txn.End()
+
+		return result
+	}
+}
+
 // New creates a new middleware handler
 func New(config ...Config) fiber.Handler {
 	// Set default config
@@ -66,20 +92,7 @@ func New(config ...Config) fiber.Handler {
 			return c.Next()
 		}
 
-		txn := app.StartTransaction(c.Path())
-		txn.SetWebRequestHTTP(toHTTPRequest(c.Context()))
-
-		c.Locals("newrelic_transaction", txn)
-
-		defer func() {
-			rw := txn.SetWebResponse(&ResponseWriter{
-				header: transformResponseHeaders(&c.Context().Response),
-			})
-
-			rw.WriteHeader(c.Context().Response.StatusCode())
-
-			txn.End()
-		}()
+		c.Locals("newrelic_app", app)
 
 		return c.Next()
 	}
